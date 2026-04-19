@@ -1,0 +1,145 @@
+"""
+PhoBERT Model — Vietnamese text classification (sentiment analysis).
+
+Uses `vinai/phobert-base` from HuggingFace Transformers.
+
+PhoBERT is a RoBERTa-based pre-trained model for Vietnamese.  It expects
+**word-segmented** input (use segmentation.py first).
+
+For classification we take the [CLS] embedding and project it through a
+simple linear head.  In a production system you would fine-tune the full
+model; here we demonstrate the inference pipeline with a randomly-
+initialised head to keep the setup self-contained.
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from dataclasses import dataclass
+from typing import Optional
+
+import torch
+import torch.nn as nn
+from transformers import AutoModel, AutoTokenizer, PreTrainedModel, PreTrainedTokenizerBase
+
+logger = logging.getLogger(__name__)
+
+# Labels for the demo sentiment classifier
+LABELS: list[str] = ["positive", "negative", "neutral"]
+
+
+@dataclass(frozen=True)
+class PredictResult:
+    """Prediction output from the model."""
+    label: str
+    confidence: float
+    processing_time_ms: float
+
+
+class PhoBERTPredictor:
+    """
+    Wraps vinai/phobert-base with a classification head.
+
+    The model is loaded lazily on first call to `load()` or `predict()`.
+    """
+
+    MODEL_NAME = "vinai/phobert-base"
+
+    def __init__(self) -> None:
+        self._tokenizer: Optional[PreTrainedTokenizerBase] = None
+        self._encoder: Optional[PreTrainedModel] = None
+        self._classifier: Optional[nn.Linear] = None
+        self._loaded = False
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    @property
+    def is_loaded(self) -> bool:
+        return self._loaded
+
+    def load(self) -> None:
+        """Download (if needed) and load PhoBERT + classification head."""
+        if self._loaded:
+            return
+
+        logger.info("Loading PhoBERT tokenizer from '%s' …", self.MODEL_NAME)
+        self._tokenizer = AutoTokenizer.from_pretrained(self.MODEL_NAME)
+
+        logger.info("Loading PhoBERT encoder from '%s' …", self.MODEL_NAME)
+        self._encoder = AutoModel.from_pretrained(self.MODEL_NAME)
+        self._encoder.eval()
+
+        # Simple linear head: hidden_size → num_labels
+        hidden_size: int = self._encoder.config.hidden_size  # 768
+        self._classifier = nn.Linear(hidden_size, len(LABELS))
+        self._classifier.eval()
+
+        self._loaded = True
+        logger.info("PhoBERT loaded successfully (%d labels)", len(LABELS))
+
+    # ------------------------------------------------------------------
+    # Inference
+    # ------------------------------------------------------------------
+
+    def predict(self, segmented_text: str) -> PredictResult:
+        """
+        Run sentiment classification on word-segmented Vietnamese text.
+
+        Args:
+            segmented_text: Vietnamese text **already** word-segmented
+                            (e.g. "Tôi rất thích sản_phẩm này").
+
+        Returns:
+            PredictResult with label, confidence and timing info.
+        """
+        if not self._loaded:
+            self.load()
+
+        assert self._tokenizer is not None
+        assert self._encoder is not None
+        assert self._classifier is not None
+
+        start = time.perf_counter()
+
+        # 1. Tokenize
+        inputs = self._tokenizer(
+            segmented_text,
+            return_tensors="pt",
+            truncation=True,
+            max_length=256,
+            padding=True,
+        )
+
+        # 2. Encode (no gradient needed)
+        with torch.no_grad():
+            encoder_output = self._encoder(**inputs)
+
+        # 3. CLS pooling → classify
+        cls_embedding = encoder_output.last_hidden_state[:, 0, :]  # (1, 768)
+
+        with torch.no_grad():
+            logits = self._classifier(cls_embedding)  # (1, num_labels)
+
+        # 4. Softmax → label + confidence
+        probs = torch.softmax(logits, dim=-1).squeeze(0)  # (num_labels,)
+        confidence, idx = probs.max(dim=0)
+
+        elapsed_ms = (time.perf_counter() - start) * 1000
+
+        result = PredictResult(
+            label=LABELS[idx.item()],
+            confidence=round(confidence.item(), 4),
+            processing_time_ms=round(elapsed_ms, 2),
+        )
+
+        logger.info(
+            "Prediction: %s (%.2f%%) in %.1f ms",
+            result.label,
+            result.confidence * 100,
+            result.processing_time_ms,
+        )
+
+        return result

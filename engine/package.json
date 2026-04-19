@@ -1,0 +1,20 @@
+{
+  "name": "type-safe-pipeline-engine",
+  "version": "1.0.0",
+  "description": "TypeScript engine for the Type-safe Data Pipeline — orchestrates validation and AI service calls",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "tsx": "^4.7.0",
+    "@types/node": "^20.12.0"
+  }
+}
